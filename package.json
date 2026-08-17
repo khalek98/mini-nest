@@ -1,0 +1,31 @@
+{
+  "name": "mini-nest",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khalek98/mini-nest.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/khalek98/mini-nest/issues"
+  },
+  "homepage": "https://github.com/khalek98/mini-nest#readme",
+  "dependencies": {
+    "reflect-metadata": "^0.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}
