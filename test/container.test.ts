@@ -81,3 +81,71 @@ test("цикл кидає помилку з ланцюгом, не RangeError", 
     assert.match((e as Error).message, /A -> B -> A/);
   }
 });
+
+test("два класи з однаковим ім'ям не дають фальшивий цикл", () => {
+  @Injectable()
+  class ConfigA {
+    n = 1;
+  }
+  @Injectable()
+  class ConfigB {
+    n = 2;
+  }
+  Object.defineProperty(ConfigA, "name", { value: "Config" });
+  Object.defineProperty(ConfigB, "name", { value: "Config" });
+
+  @Injectable()
+  class App {
+    constructor(
+      readonly a: ConfigA,
+      readonly b: ConfigB,
+    ) {}
+  }
+
+  const app = new Container().resolve(App);
+  assert.equal(app.a.n, 1);
+  assert.equal(app.b.n, 2);
+});
+test("два класи з однаковим ім'ям не дають фальшивий цикл", () => {
+  @Injectable()
+  class ConfigA {
+    n = 1;
+  }
+  @Injectable()
+  class ConfigB {
+    n = 2;
+  }
+  Object.defineProperty(ConfigA, "name", { value: "Config" });
+  Object.defineProperty(ConfigB, "name", { value: "Config" });
+
+  @Injectable()
+  class App {
+    constructor(
+      readonly a: ConfigA,
+      readonly b: ConfigB,
+    ) {}
+  }
+
+  const app = new Container().resolve(App);
+  assert.equal(app.a.n, 1);
+  assert.equal(app.b.n, 2);
+});
+
+test("підклас без @Injectable не бере мітку батька", () => {
+  @Injectable()
+  class Parent {}
+  class Child extends Parent {}
+
+  assert.throws(() => new Container().resolve(Child), {
+    message: "Child не позначений @Injectable()",
+  });
+});
+
+test("повторний register після resolve дає нове значення", () => {
+  const c = new Container();
+  c.register(CONFIG, { n: 1 });
+  assert.equal((c.resolve(CONFIG) as { n: number }).n, 1);
+
+  c.register(CONFIG, { n: 2 });
+  assert.equal((c.resolve(CONFIG) as { n: number }).n, 2);
+});

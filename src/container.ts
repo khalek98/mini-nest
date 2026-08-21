@@ -10,18 +10,22 @@ export class Container {
 
   register(token: InjectionToken, value: unknown): this {
     this.providers.set(token, value);
+    this.singletons.delete(token);
     return this;
   }
 
-  resolve<T>(target: Ctor<T> | InjectionToken, path: string[] = []): T {
+  resolve<T>(target: Ctor<T> | InjectionToken, path: InjectionToken[] = []): T {
     const name = typeof target === "function" ? target.name : String(target);
 
     if (this.singletons.has(target)) {
       return this.singletons.get(target) as T;
     }
 
-    if (path.includes(name)) {
-      throw new Error(`цикл залежностей: ${[...path, name].join(" -> ")}`);
+    if (path.includes(target)) {
+      const chain = [...path, target].map((t) =>
+        typeof t === "function" ? t.name : String(t),
+      );
+      throw new Error(`цикл залежностей: ${chain.join(" -> ")}`);
     }
 
     if (typeof target !== "function") {
@@ -35,19 +39,19 @@ export class Container {
 
     const ctor = target as Ctor<T>;
 
-    if (!Reflect.getMetadata(INJECTABLE_KEY, ctor)) {
+    if (!Reflect.getOwnMetadata(INJECTABLE_KEY, ctor)) {
       throw new Error(`${ctor.name} не позначений @Injectable()`);
     }
 
-    const paramtypes = (Reflect.getMetadata("design:paramtypes", ctor) ??
+    const paramtypes = (Reflect.getOwnMetadata("design:paramtypes", ctor) ??
       []) as InjectionToken[];
     const injected = (Reflect.getOwnMetadata(INJECT_KEY, ctor) ??
       []) as InjectionToken[];
     const deps = paramtypes.map((type, i) => injected[i] ?? type);
 
-    const args = deps.map((dep) => this.resolve(dep, [...path, name]));
+    const args = deps.map((dep) => this.resolve(dep, [...path, ctor]));
     const instance = new ctor(...args);
-    const scope = Reflect.getMetadata(SCOPE_KEY, ctor) as Scope;
+    const scope = Reflect.getOwnMetadata(SCOPE_KEY, ctor) as Scope | undefined;
 
     if (scope === "singleton") {
       this.singletons.set(ctor, instance);
