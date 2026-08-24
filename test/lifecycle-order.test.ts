@@ -13,6 +13,7 @@ import {
   type RequestContext,
 } from "../src/dispatcher.js";
 import { authGuard } from "../src/guards/auth.guard.js";
+import { loggingInterceptor } from "../src/interceptors/logging.interceptor.js";
 import { Controller } from "../src/decorators/controller.js";
 import { Injectable } from "../src/decorators/injectable.js";
 import { Get } from "../src/decorators/methods.js";
@@ -177,6 +178,33 @@ test("AuthGuard з Authorization → 200, handler викликається", asy
     assert.equal(res.status, 200);
     assert.equal(body.secret, 99);
     assert.equal(handlerCalls, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+test("LoggingInterceptor логує METHOD, шлях і тривалість у ms", async () => {
+  const logs: string[] = [];
+
+  const container = new Container();
+  const server: http.Server = createApp(container, [OrderController], {
+    interceptors: [loggingInterceptor((line) => logs.push(line))],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/order`);
+    assert.equal(res.status, 200);
+    assert.equal(logs.length, 1);
+    const line = logs[0]!;
+    console.log(line);
+    assert.match(line, /[0-9]+(\.[0-9]+)? ?ms/);
+    assert.match(line, /GET/);
+    assert.match(line, /\/order/);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),

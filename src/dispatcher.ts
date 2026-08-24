@@ -9,9 +9,11 @@ import {
 import { type HttpMethod } from "./decorators/methods.js";
 import { compose, passThrough, type Middleware } from "./middleware/compose.js";
 import { type Guard } from "./guards/auth.guard.js";
+import { type Interceptor } from "./interceptors/logging.interceptor.js";
 
 export type { Middleware } from "./middleware/compose.js";
 export type { Guard } from "./guards/auth.guard.js";
+export type { Interceptor } from "./interceptors/logging.interceptor.js";
 
 export class InvalidJsonError extends Error {
   constructor() {
@@ -199,8 +201,10 @@ async function runLifecycle(
   hooks: LifecycleHooks,
   middleware: Middleware[],
   guards: Guard[],
+  interceptors: Interceptor[],
 ): Promise<unknown> {
   const outer = compose(middleware);
+  const intercept = compose(interceptors);
 
   return outer(ctx, async () => {
     const allowed = await runGuards(ctx, guards, hooks.onGuard);
@@ -210,14 +214,16 @@ async function runLifecycle(
       return undefined;
     }
 
-    const intercept =
+    const inner =
       hooks.onInterceptor ?? ((_ctx: RequestContext, next: Next) => next());
 
-    return intercept(ctx, async () => {
-      await applyBodyValidation(ctx, paramtypes);
-      await hooks.onPipe?.(ctx);
-      return createHandlerStage(ctx)();
-    });
+    return intercept(ctx, () =>
+      inner(ctx, async () => {
+        await applyBodyValidation(ctx, paramtypes);
+        await hooks.onPipe?.(ctx);
+        return createHandlerStage(ctx)();
+      }),
+    );
   });
 }
 
@@ -226,6 +232,8 @@ export type CreateAppOptions = {
   middleware?: Middleware[];
   /** Optional guards (e.g. authGuard). All must return true; false → 403. */
   guards?: Guard[];
+  /** Optional interceptors (e.g. loggingInterceptor). First registered = outermost. */
+  interceptors?: Interceptor[];
 };
 
 function resolveMiddleware(
@@ -253,6 +261,7 @@ export function createApp(
   const hooks = options.hooks ?? {};
   const middleware = resolveMiddleware(hooks, options.middleware);
   const guards = options.guards ?? [];
+  const interceptors = options.interceptors ?? [];
   const routes = collectRoutes(controllers);
 
   return http.createServer(async (req, res) => {
@@ -311,7 +320,14 @@ export function createApp(
         httpMethod: method,
       };
 
-      const result = await runLifecycle(ctx, paramtypes, hooks, middleware, guards);
+      const result = await runLifecycle(
+        ctx,
+        paramtypes,
+        hooks,
+        middleware,
+        guards,
+        interceptors,
+      );
       if (res.headersSent) return;
 
       sendJson(res, method === "POST" ? 201 : 200, result ?? null);
