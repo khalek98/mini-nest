@@ -8,8 +8,10 @@ import {
 } from "./pipes/validation.pipe.js";
 import { type HttpMethod } from "./decorators/methods.js";
 import { compose, passThrough, type Middleware } from "./middleware/compose.js";
+import { type Guard } from "./guards/auth.guard.js";
 
 export type { Middleware } from "./middleware/compose.js";
+export type { Guard } from "./guards/auth.guard.js";
 
 export class InvalidJsonError extends Error {
   constructor() {
@@ -179,16 +181,31 @@ async function applyBodyValidation(
   }
 }
 
+async function runGuards(
+  ctx: RequestContext,
+  guards: Guard[],
+  onGuard: LifecycleHooks["onGuard"],
+): Promise<boolean> {
+  for (const guard of guards) {
+    if (!(await guard(ctx))) return false;
+  }
+  if (onGuard && !(await onGuard(ctx))) return false;
+  return true;
+}
+
 async function runLifecycle(
   ctx: RequestContext,
   paramtypes: Function[],
   hooks: LifecycleHooks,
   middleware: Middleware[],
+  guards: Guard[],
 ): Promise<unknown> {
   const outer = compose(middleware);
 
   return outer(ctx, async () => {
-    if (hooks.onGuard && !(await hooks.onGuard(ctx))) {
+    const allowed = await runGuards(ctx, guards, hooks.onGuard);
+    if (!allowed) {
+      // Guard only returns false — dispatcher owns the 403 body (Nest CanActivate).
       sendJson(ctx.res, 403, { error: "Forbidden" });
       return undefined;
     }
@@ -207,6 +224,8 @@ async function runLifecycle(
 export type CreateAppOptions = {
   hooks?: LifecycleHooks;
   middleware?: Middleware[];
+  /** Optional guards (e.g. authGuard). All must return true; false → 403. */
+  guards?: Guard[];
 };
 
 function resolveMiddleware(
@@ -233,6 +252,7 @@ export function createApp(
 ) {
   const hooks = options.hooks ?? {};
   const middleware = resolveMiddleware(hooks, options.middleware);
+  const guards = options.guards ?? [];
   const routes = collectRoutes(controllers);
 
   return http.createServer(async (req, res) => {
@@ -291,7 +311,7 @@ export function createApp(
         httpMethod: method,
       };
 
-      const result = await runLifecycle(ctx, paramtypes, hooks, middleware);
+      const result = await runLifecycle(ctx, paramtypes, hooks, middleware, guards);
       if (res.headersSent) return;
 
       sendJson(res, method === "POST" ? 201 : 200, result ?? null);

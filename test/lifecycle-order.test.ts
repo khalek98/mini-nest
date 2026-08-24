@@ -12,6 +12,7 @@ import {
   type Next,
   type RequestContext,
 } from "../src/dispatcher.js";
+import { authGuard } from "../src/guards/auth.guard.js";
 import { Controller } from "../src/decorators/controller.js";
 import { Injectable } from "../src/decorators/injectable.js";
 import { Get } from "../src/decorators/methods.js";
@@ -112,6 +113,70 @@ test("middleware без next() зупиняє ланцюг (handler не вик�
     console.log(`order: ${order}`);
     assert.deepEqual(order, ["middleware"]);
     assert.ok(!order.includes("handler"));
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+let handlerCalls = 0;
+
+@Controller("secure")
+@Injectable()
+class SecureController {
+  @Get()
+  handle() {
+    handlerCalls += 1;
+    return { secret: 99 };
+  }
+}
+
+test("AuthGuard без Authorization → 403, handler не викликається", async () => {
+  handlerCalls = 0;
+
+  const container = new Container();
+  const server: http.Server = createApp(container, [SecureController], {
+    guards: [authGuard],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/secure`);
+    const body = (await res.json()) as { error: string };
+    console.log(`${res.status} ${JSON.stringify(body)} ${handlerCalls}`);
+    assert.equal(res.status, 403);
+    assert.equal(body.error, "Forbidden");
+    assert.equal(handlerCalls, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+test("AuthGuard з Authorization → 200, handler викликається", async () => {
+  handlerCalls = 0;
+
+  const container = new Container();
+  const server: http.Server = createApp(container, [SecureController], {
+    guards: [authGuard],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/secure`, {
+      headers: { Authorization: "Bearer test" },
+    });
+    const body = (await res.json()) as { secret: number };
+    console.log(`${res.status} ${JSON.stringify(body)} ${handlerCalls}`);
+    assert.equal(res.status, 200);
+    assert.equal(body.secret, 99);
+    assert.equal(handlerCalls, 1);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
