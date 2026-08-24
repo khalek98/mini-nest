@@ -106,30 +106,6 @@ test("два класи з однаковим ім'ям не дають фаль
   assert.equal(app.a.n, 1);
   assert.equal(app.b.n, 2);
 });
-test("два класи з однаковим ім'ям не дають фальшивий цикл", () => {
-  @Injectable()
-  class ConfigA {
-    n = 1;
-  }
-  @Injectable()
-  class ConfigB {
-    n = 2;
-  }
-  Object.defineProperty(ConfigA, "name", { value: "Config" });
-  Object.defineProperty(ConfigB, "name", { value: "Config" });
-
-  @Injectable()
-  class App {
-    constructor(
-      readonly a: ConfigA,
-      readonly b: ConfigB,
-    ) {}
-  }
-
-  const app = new Container().resolve(App);
-  assert.equal(app.a.n, 1);
-  assert.equal(app.b.n, 2);
-});
 
 test("підклас без @Injectable не бере мітку батька", () => {
   @Injectable()
