@@ -19,6 +19,7 @@ import { Controller } from "../src/decorators/controller.js";
 import { Injectable } from "../src/decorators/injectable.js";
 import { Get, Post } from "../src/decorators/methods.js";
 import { Body } from "../src/decorators/params.js";
+import { Public } from "../src/decorators/public.js";
 import { CreateUserDto } from "../src/dto/create-user.dto.js";
 import { NotFoundError } from "../src/filters/exception.filter.js";
 
@@ -208,7 +209,7 @@ class SecureController {
   }
 }
 
-test("AuthGuard пропускає /health без Authorization (Docker HEALTHCHECK)", async () => {
+test("AuthGuard пропускає /health без Authorization (@Public, не path)", async () => {
   const container = new Container();
   const server: http.Server = createApp(container, [HealthController], {
     guards: [authGuard],
@@ -222,6 +223,37 @@ test("AuthGuard пропускає /health без Authorization (Docker HEALTHCH
     const body = (await res.json()) as { status: string };
     assert.equal(res.status, 200);
     assert.equal(body.status, "ok");
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+@Controller("open")
+@Injectable()
+class PublicController {
+  @Public()
+  @Get()
+  handle() {
+    return { open: true };
+  }
+}
+
+test("@Public() маршрут без Authorization → 200", async () => {
+  const container = new Container();
+  const server: http.Server = createApp(container, [PublicController], {
+    guards: [authGuard],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/open`);
+    const body = (await res.json()) as { open: boolean };
+    assert.equal(res.status, 200);
+    assert.equal(body.open, true);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),

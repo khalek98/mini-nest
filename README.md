@@ -37,7 +37,7 @@ request
   ↑ exception filter wraps the whole try/catch
 ```
 
-- **AuthGuard** — до pipe і handler. Повертає лише `boolean`: немає `Authorization` → dispatcher шле `403`, handler не викликається.
+- **AuthGuard** — глобальний guard у `server.ts` на всі маршрути. Повертає лише `boolean`: немає `Authorization` → dispatcher шле `403`, handler не викликається. Маршрути з `@Public()` (метод або весь контролер) пропускаються без заголовка — для `/health`, майбутніх register/login.
 - **LoggingInterceptor** — обгортає `next()`: код до handler, виклик, код після. Таймінг включає pipe і handler (все, що в середині `next()`). Лог: `METHOD /path — 12.3 ms`.
 - **Zod pipe** — валідація `@Body` безпосередньо перед handler. DTO тримає `static schema` (Zod 4); `safeParse` кидає `ValidationError` зі списком полів (`error.issues`, не Zod 3 `error.errors`).
 - **Exception Filter** — `NotFoundError` → 404, `ValidationError` → 400 зі списком полів, усе інше → 500 **без** стек-трейсу й без внутрішнього тексту на кшталт `boom`.
