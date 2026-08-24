@@ -3,9 +3,9 @@ import http from "node:http";
 import type { Container } from "./container.js";
 import { collectRoutes, type RouteInfo } from "./router.js";
 import {
-  ValidationFailedError,
-  validationPipe,
-} from "./pipes/validation.pipe.js";
+  ValidationError,
+  zodValidationPipe,
+} from "./pipes/zod-validation.pipe.js";
 import { type HttpMethod } from "./decorators/methods.js";
 import { compose, passThrough, type Middleware } from "./middleware/compose.js";
 import { type Guard } from "./guards/auth.guard.js";
@@ -178,7 +178,7 @@ async function applyBodyValidation(
 
     const metatype = paramtypes[i] as (new (...a: any[]) => object) | undefined;
     if (metatype && !PRIMITIVES.has(metatype as any)) {
-      ctx.args[i] = await validationPipe(ctx.args[i], metatype);
+      ctx.args[i] = zodValidationPipe(ctx.args[i], metatype);
     }
   }
 }
@@ -332,7 +332,7 @@ export function createApp(
 
       sendJson(res, method === "POST" ? 201 : 200, result ?? null);
     } catch (err) {
-      if (err instanceof ValidationFailedError) {
+      if (err instanceof ValidationError) {
         sendJson(res, 400, err.errors);
         return;
       }
