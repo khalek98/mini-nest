@@ -7,6 +7,9 @@ import {
   validationPipe,
 } from "./pipes/validation.pipe.js";
 import { type HttpMethod } from "./decorators/methods.js";
+import { compose, passThrough, type Middleware } from "./middleware/compose.js";
+
+export type { Middleware } from "./middleware/compose.js";
 
 export class InvalidJsonError extends Error {
   constructor() {
@@ -180,27 +183,48 @@ async function runLifecycle(
   ctx: RequestContext,
   paramtypes: Function[],
   hooks: LifecycleHooks,
+  middleware: Middleware[],
 ): Promise<unknown> {
-  await hooks.onMiddleware?.(ctx);
+  const outer = compose(middleware);
 
-  if (hooks.onGuard && !(await hooks.onGuard(ctx))) {
-    sendJson(ctx.res, 403, { error: "Forbidden" });
-    return undefined;
-  }
+  return outer(ctx, async () => {
+    if (hooks.onGuard && !(await hooks.onGuard(ctx))) {
+      sendJson(ctx.res, 403, { error: "Forbidden" });
+      return undefined;
+    }
 
-  const intercept =
-    hooks.onInterceptor ?? ((_ctx: RequestContext, next: Next) => next());
+    const intercept =
+      hooks.onInterceptor ?? ((_ctx: RequestContext, next: Next) => next());
 
-  return intercept(ctx, async () => {
-    await applyBodyValidation(ctx, paramtypes);
-    await hooks.onPipe?.(ctx);
-    return createHandlerStage(ctx)();
+    return intercept(ctx, async () => {
+      await applyBodyValidation(ctx, paramtypes);
+      await hooks.onPipe?.(ctx);
+      return createHandlerStage(ctx)();
+    });
   });
 }
 
 export type CreateAppOptions = {
   hooks?: LifecycleHooks;
+  middleware?: Middleware[];
 };
+
+function resolveMiddleware(
+  hooks: LifecycleHooks,
+  middleware: Middleware[] | undefined,
+): Middleware[] {
+  const list = middleware?.length ? [...middleware] : [passThrough];
+
+  if (hooks.onMiddleware) {
+    const onMiddleware = hooks.onMiddleware;
+    list.unshift(async (ctx, next) => {
+      await onMiddleware(ctx);
+      return next();
+    });
+  }
+
+  return list;
+}
 
 export function createApp(
   container: Container,
@@ -208,6 +232,7 @@ export function createApp(
   options: CreateAppOptions = {},
 ) {
   const hooks = options.hooks ?? {};
+  const middleware = resolveMiddleware(hooks, options.middleware);
   const routes = collectRoutes(controllers);
 
   return http.createServer(async (req, res) => {
@@ -266,7 +291,7 @@ export function createApp(
         httpMethod: method,
       };
 
-      const result = await runLifecycle(ctx, paramtypes, hooks);
+      const result = await runLifecycle(ctx, paramtypes, hooks, middleware);
       if (res.headersSent) return;
 
       sendJson(res, method === "POST" ? 201 : 200, result ?? null);

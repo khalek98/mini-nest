@@ -8,6 +8,7 @@ import { Container } from "../src/container.js";
 import {
   createApp,
   type LifecycleHooks,
+  type Middleware,
   type Next,
   type RequestContext,
 } from "../src/dispatcher.js";
@@ -27,12 +28,13 @@ class OrderController {
   }
 }
 
+const orderMiddleware: Middleware = async (_ctx, next) => {
+  order.push("middleware");
+  return next();
+};
+
 function stubsThatLogOrder(): LifecycleHooks {
   return {
-    onMiddleware(ctx: RequestContext) {
-      void ctx;
-      order.push("middleware");
-    },
     onGuard(ctx: RequestContext) {
       void ctx;
       order.push("guard");
@@ -58,6 +60,7 @@ test("порядок lifecycle: middleware → guard → interceptor → pipe �
   const container = new Container();
   const server: http.Server = createApp(container, [OrderController], {
     hooks: stubsThatLogOrder(),
+    middleware: [orderMiddleware],
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -80,6 +83,35 @@ test("порядок lifecycle: middleware → guard → interceptor → pipe �
       "handler",
       "interceptor:after",
     ]);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+test("middleware без next() зупиняє ланцюг (handler не викликається)", async () => {
+  order.length = 0;
+
+  const stopMiddleware: Middleware = async () => {
+    order.push("middleware");
+    // без next() — далі нічого
+  };
+
+  const container = new Container();
+  const server: http.Server = createApp(container, [OrderController], {
+    hooks: stubsThatLogOrder(),
+    middleware: [stopMiddleware],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    await fetch(`http://127.0.0.1:${port}/order`);
+    console.log(`order: ${order}`);
+    assert.deepEqual(order, ["middleware"]);
+    assert.ok(!order.includes("handler"));
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
