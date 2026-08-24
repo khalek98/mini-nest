@@ -1,6 +1,8 @@
 import "reflect-metadata";
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import type { Container } from "./container.js";
+import { runWithRequestContext } from "./context/request-context.js";
 import { collectRoutes, type RouteInfo } from "./router.js";
 import { zodValidationPipe } from "./pipes/zod-validation.pipe.js";
 import { type HttpMethod } from "./decorators/methods.js";
@@ -252,75 +254,84 @@ export function createApp(
   const interceptors = options.interceptors ?? [];
   const routes = collectRoutes(controllers);
 
-  return http.createServer(async (req, res) => {
-    try {
-      const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
+  return http.createServer((req, res) => {
+    const incoming = req.headers["x-request-id"];
+    const requestId =
+      (typeof incoming === "string" && incoming) ||
+      (Array.isArray(incoming) && incoming[0]) ||
+      randomUUID();
+    res.setHeader("X-Request-Id", requestId);
 
-      const url = new URL(
-        req.url ?? "/",
-        `http://${req.headers.host ?? "localhost"}`,
-      );
+    return runWithRequestContext(requestId, async () => {
+      try {
+        const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
 
-      const found = findRoute(routes, method, url.pathname);
-      if (!found) {
-        if (pathMatchesAnyRoute(routes, url.pathname)) {
-          sendJson(res, 405, { error: "Method Not Allowed" });
+        const url = new URL(
+          req.url ?? "/",
+          `http://${req.headers.host ?? "localhost"}`,
+        );
+
+        const found = findRoute(routes, method, url.pathname);
+        if (!found) {
+          if (pathMatchesAnyRoute(routes, url.pathname)) {
+            sendJson(res, 405, { error: "Method Not Allowed" });
+            return;
+          }
+          sendJson(res, 404, { error: "Not Found" });
           return;
         }
-        sendJson(res, 404, { error: "Not Found" });
-        return;
-      }
 
-      const { route, params: pathParams } = found;
-      const body = await readBody(req);
-      const query = Object.fromEntries(url.searchParams.entries());
+        const { route, params: pathParams } = found;
+        const body = await readBody(req);
+        const query = Object.fromEntries(url.searchParams.entries());
 
-      const paramtypes = getHandlerParamtypes(
-        route.controller,
-        route.handlerName,
-      );
+        const paramtypes = getHandlerParamtypes(
+          route.controller,
+          route.handlerName,
+        );
 
-      const args: unknown[] = [];
+        const args: unknown[] = [];
 
-      for (let i = 0; i < route.params.length; i++) {
-        const meta = route.params[i];
-        if (!meta) continue;
+        for (let i = 0; i < route.params.length; i++) {
+          const meta = route.params[i];
+          if (!meta) continue;
 
-        if (meta.type === "param") {
-          args[i] = pathParams[meta.name!];
-        } else if (meta.type === "query") {
-          args[i] = query[meta.name!];
-        } else if (meta.type === "body") {
-          args[i] = body;
+          if (meta.type === "param") {
+            args[i] = pathParams[meta.name!];
+          } else if (meta.type === "query") {
+            args[i] = query[meta.name!];
+          } else if (meta.type === "body") {
+            args[i] = body;
+          }
         }
+
+        const instance = container.resolve(
+          route.controller as new (...a: any[]) => any,
+        );
+
+        const ctx: RequestContext = {
+          req,
+          res,
+          route,
+          args,
+          instance,
+          httpMethod: method,
+        };
+
+        const result = await runLifecycle(
+          ctx,
+          paramtypes,
+          hooks,
+          middleware,
+          guards,
+          interceptors,
+        );
+        if (res.headersSent) return;
+
+        sendJson(res, method === "POST" ? 201 : 200, result ?? null);
+      } catch (err) {
+        exceptionFilter(err, res);
       }
-
-      const instance = container.resolve(
-        route.controller as new (...a: any[]) => any,
-      );
-
-      const ctx: RequestContext = {
-        req,
-        res,
-        route,
-        args,
-        instance,
-        httpMethod: method,
-      };
-
-      const result = await runLifecycle(
-        ctx,
-        paramtypes,
-        hooks,
-        middleware,
-        guards,
-        interceptors,
-      );
-      if (res.headersSent) return;
-
-      sendJson(res, method === "POST" ? 201 : 200, result ?? null);
-    } catch (err) {
-      exceptionFilter(err, res);
-    }
+    });
   });
 }
