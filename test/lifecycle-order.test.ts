@@ -14,9 +14,12 @@ import {
 } from "../src/dispatcher.js";
 import { authGuard } from "../src/guards/auth.guard.js";
 import { loggingInterceptor } from "../src/interceptors/logging.interceptor.js";
+import { HealthController } from "../src/controllers/health.controller.js";
 import { Controller } from "../src/decorators/controller.js";
 import { Injectable } from "../src/decorators/injectable.js";
-import { Get } from "../src/decorators/methods.js";
+import { Get, Post } from "../src/decorators/methods.js";
+import { Body } from "../src/decorators/params.js";
+import { CreateUserDto } from "../src/dto/create-user.dto.js";
 import { NotFoundError } from "../src/filters/exception.filter.js";
 
 const order: string[] = [];
@@ -28,6 +31,16 @@ class OrderController {
   handle() {
     order.push("handler");
     return { ok: true };
+  }
+}
+
+@Controller("create")
+@Injectable()
+class CreateOrderController {
+  @Post()
+  create(@Body() dto: CreateUserDto) {
+    order.push("handler");
+    return { name: dto.name };
   }
 }
 
@@ -73,11 +86,9 @@ test("порядок lifecycle: middleware → guard → interceptor → pipe �
     const res = await fetch(`http://127.0.0.1:${port}/order`);
     const body = (await res.json()) as { ok: boolean };
 
-    console.log(`res: ${res.status} ${JSON.stringify(body)}`);
     assert.equal(res.status, 200);
     assert.equal(body.ok, true);
 
-    console.log(`order: ${order}`);
     assert.deepEqual(order, [
       "middleware",
       "guard",
@@ -86,6 +97,70 @@ test("порядок lifecycle: middleware → guard → interceptor → pipe �
       "handler",
       "interceptor:after",
     ]);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+test("реальні authGuard + loggingInterceptor + Zod pipe — правильний порядок", async () => {
+  order.length = 0;
+  const logs: string[] = [];
+
+  const container = new Container();
+  const server: http.Server = createApp(container, [CreateOrderController], {
+    guards: [
+      (ctx) => {
+        order.push("guard");
+        return authGuard(ctx);
+      },
+    ],
+    interceptors: [
+      (ctx, next) => {
+        order.push("interceptor:before");
+        return loggingInterceptor((line) => logs.push(line))(ctx, async () => {
+          const result = await next();
+          order.push("interceptor:after");
+          return result;
+        });
+      },
+    ],
+    hooks: {
+      onPipe() {
+        order.push("pipe");
+      },
+    },
+    middleware: [orderMiddleware],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/create`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Ada", email: "ada@example.com" }),
+    });
+    const body = (await res.json()) as { name: string };
+
+    assert.equal(res.status, 201);
+    assert.equal(body.name, "Ada");
+    assert.deepEqual(order, [
+      "middleware",
+      "guard",
+      "interceptor:before",
+      "pipe",
+      "handler",
+      "interceptor:after",
+    ]);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /POST/);
+    assert.match(logs[0]!, /\/create/);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
@@ -112,7 +187,6 @@ test("middleware без next() зупиняє ланцюг (handler не вик�
 
   try {
     await fetch(`http://127.0.0.1:${port}/order`);
-    console.log(`order: ${order}`);
     assert.deepEqual(order, ["middleware"]);
     assert.ok(!order.includes("handler"));
   } finally {
@@ -134,6 +208,27 @@ class SecureController {
   }
 }
 
+test("AuthGuard пропускає /health без Authorization (Docker HEALTHCHECK)", async () => {
+  const container = new Container();
+  const server: http.Server = createApp(container, [HealthController], {
+    guards: [authGuard],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    const body = (await res.json()) as { status: string };
+    assert.equal(res.status, 200);
+    assert.equal(body.status, "ok");
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
 test("AuthGuard без Authorization → 403, handler не викликається", async () => {
   handlerCalls = 0;
 
@@ -148,7 +243,6 @@ test("AuthGuard без Authorization → 403, handler не викликаєть�
   try {
     const res = await fetch(`http://127.0.0.1:${port}/secure`);
     const body = (await res.json()) as { error: string };
-    console.log(`${res.status} ${JSON.stringify(body)} ${handlerCalls}`);
     assert.equal(res.status, 403);
     assert.equal(body.error, "Forbidden");
     assert.equal(handlerCalls, 0);
@@ -175,7 +269,6 @@ test("AuthGuard з Authorization → 200, handler викликається", asy
       headers: { Authorization: "Bearer test" },
     });
     const body = (await res.json()) as { secret: number };
-    console.log(`${res.status} ${JSON.stringify(body)} ${handlerCalls}`);
     assert.equal(res.status, 200);
     assert.equal(body.secret, 99);
     assert.equal(handlerCalls, 1);
@@ -202,7 +295,6 @@ test("LoggingInterceptor логує METHOD, шлях і тривалість у 
     assert.equal(res.status, 200);
     assert.equal(logs.length, 1);
     const line = logs[0]!;
-    console.log(line);
     assert.match(line, /[0-9]+(\.[0-9]+)? ?ms/);
     assert.match(line, /GET/);
     assert.match(line, /\/order/);
@@ -232,7 +324,6 @@ test("невідома Error('boom') → 500 без boom і без стеку", 
   try {
     const res = await fetch(`http://127.0.0.1:${port}/boom`);
     const text = await res.text();
-    console.log(`${res.status} ${text}`);
     assert.equal(res.status, 500);
     assert.doesNotMatch(text, /boom|at .*\.ts:/);
     const body = JSON.parse(text) as { error: string };
@@ -263,7 +354,6 @@ test("NotFoundError → 404 з осмисленим повідомленням",
   try {
     const res = await fetch(`http://127.0.0.1:${port}/missing`);
     const body = (await res.json()) as { error: string };
-    console.log(`${res.status} ${JSON.stringify(body)}`);
     assert.equal(res.status, 404);
     assert.match(body.error, /User not found/i);
   } finally {

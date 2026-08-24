@@ -30,13 +30,6 @@ test("клієнтський X-Request-Id додається до заголов
       headers: { "X-Request-Id": "abc" },
     });
     const body = (await res.json()) as { id: string; requestId: string };
-    console.log(`Response status: ${res.status} body: ${JSON.stringify(body)}`);
-    console.log(
-      `res.headers.get("x-request-id"): ${res.headers.get("x-request-id")}`,
-    );
-    console.log(`body.requestId: ${body.requestId}`);
-    console.log(`JSON.stringify(body): ${JSON.stringify(body)}`);
-    console.log(`/42/: ${/42/}`);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("x-request-id"), "abc");
     assert.equal(body.requestId, "abc");
@@ -49,9 +42,6 @@ test("без заголовка генерується requestId і той са�
     const res = await fetch(`${base}/users/42`);
     const body = (await res.json()) as { requestId: string };
     const echoed = res.headers.get("x-request-id");
-    console.log(
-      `Response status: ${res.status} body: ${JSON.stringify(body)} echoed: ${echoed}`,
-    );
     assert.equal(res.status, 200);
     assert.ok(echoed);
     assert.match(echoed, /^[0-9a-f-]{36}$/i);
@@ -77,9 +67,6 @@ test("10 паралельних запитів не змішують requestId",
     );
 
     for (const row of results) {
-      console.log(
-        `row.header: ${row.header} row.body: ${row.body} row.sent: ${row.sent}`,
-      );
       assert.equal(row.header, row.sent);
       assert.equal(row.body, row.sent);
     }
