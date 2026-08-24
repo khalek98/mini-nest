@@ -21,6 +21,38 @@ docker compose run --rm api npm test
 docker compose up app
 ```
 
+## Перевірка через curl
+
+Сервер слухає **:3000** після `npm run build && npm start` або `docker compose up app`. У другому терміналі:
+
+```bash
+# /health — @Public(), заголовок Authorization не потрібен
+curl -s -D - http://localhost:3000/health -o /dev/null
+
+# /users/* — глобальний authGuard: потрібен непорожній Authorization (значення токена не перевіряється)
+curl -s http://localhost:3000/users
+# → 403 {"error":"Forbidden"}
+
+curl -s -H 'Authorization: Bearer test' http://localhost:3000/users/1
+# у консолі сервера: GET /users/:id — X.X ms (LoggingInterceptor)
+
+curl -s -H 'Authorization: Bearer test' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Ada","email":"ada@example.com"}' \
+  http://localhost:3000/users
+
+curl -s -H 'Authorization: Bearer test' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Ada","email":"not-an-email"}' \
+  http://localhost:3000/users
+# → 400 (Zod pipe, невалідний email)
+
+# X-Request-Id: якщо передати — повернеться в відповіді; інакше згенерується
+curl -s -D - -H 'Authorization: Bearer test' -H 'X-Request-Id: demo-42' \
+  http://localhost:3000/users/1 -o /dev/null | grep -i x-request-id
+```
+
+
 ## Порядок lifecycle
 
 Кожен HTTP-запит проходить ті самі етапи. Exception filter — не «після відповіді», а `try/catch` навколо всього ланцюга: будь-який `throw` (guard, pipe, handler, interceptor) стає HTTP-відповіддю, а не падінням процесу.
