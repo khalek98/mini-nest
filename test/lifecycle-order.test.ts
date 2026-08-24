@@ -17,6 +17,7 @@ import { loggingInterceptor } from "../src/interceptors/logging.interceptor.js";
 import { Controller } from "../src/decorators/controller.js";
 import { Injectable } from "../src/decorators/injectable.js";
 import { Get } from "../src/decorators/methods.js";
+import { NotFoundError } from "../src/filters/exception.filter.js";
 
 const order: string[] = [];
 
@@ -205,6 +206,66 @@ test("LoggingInterceptor логує METHOD, шлях і тривалість у 
     assert.match(line, /[0-9]+(\.[0-9]+)? ?ms/);
     assert.match(line, /GET/);
     assert.match(line, /\/order/);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+@Controller("boom")
+@Injectable()
+class BoomController {
+  @Get()
+  handle() {
+    throw new Error("boom");
+  }
+}
+
+test("невідома Error('boom') → 500 без boom і без стеку", async () => {
+  const container = new Container();
+  const server: http.Server = createApp(container, [BoomController]);
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/boom`);
+    const text = await res.text();
+    console.log(`${res.status} ${text}`);
+    assert.equal(res.status, 500);
+    assert.doesNotMatch(text, /boom|at .*\.ts:/);
+    const body = JSON.parse(text) as { error: string };
+    assert.equal(body.error, "Internal Server Error");
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+});
+
+@Controller("missing")
+@Injectable()
+class MissingController {
+  @Get()
+  handle() {
+    throw new NotFoundError("User not found");
+  }
+}
+
+test("NotFoundError → 404 з осмисленим повідомленням", async () => {
+  const container = new Container();
+  const server: http.Server = createApp(container, [MissingController]);
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/missing`);
+    const body = (await res.json()) as { error: string };
+    console.log(`${res.status} ${JSON.stringify(body)}`);
+    assert.equal(res.status, 404);
+    assert.match(body.error, /User not found/i);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),

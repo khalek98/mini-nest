@@ -2,32 +2,20 @@ import "reflect-metadata";
 import http from "node:http";
 import type { Container } from "./container.js";
 import { collectRoutes, type RouteInfo } from "./router.js";
-import {
-  ValidationError,
-  zodValidationPipe,
-} from "./pipes/zod-validation.pipe.js";
+import { zodValidationPipe } from "./pipes/zod-validation.pipe.js";
 import { type HttpMethod } from "./decorators/methods.js";
 import { compose, passThrough, type Middleware } from "./middleware/compose.js";
 import { type Guard } from "./guards/auth.guard.js";
 import { type Interceptor } from "./interceptors/logging.interceptor.js";
+import {
+  exceptionFilter,
+  InvalidJsonError,
+  PayloadTooLargeError,
+} from "./filters/exception.filter.js";
 
 export type { Middleware } from "./middleware/compose.js";
 export type { Guard } from "./guards/auth.guard.js";
 export type { Interceptor } from "./interceptors/logging.interceptor.js";
-
-export class InvalidJsonError extends Error {
-  constructor() {
-    super("Invalid JSON");
-    this.name = "InvalidJsonError";
-  }
-}
-
-export class PayloadTooLargeError extends Error {
-  constructor() {
-    super("Payload Too Large");
-    this.name = "PayloadTooLargeError";
-  }
-}
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -332,20 +320,7 @@ export function createApp(
 
       sendJson(res, method === "POST" ? 201 : 200, result ?? null);
     } catch (err) {
-      if (err instanceof ValidationError) {
-        sendJson(res, 400, err.errors);
-        return;
-      }
-      if (err instanceof InvalidJsonError) {
-        sendJson(res, 400, { error: err.message });
-        return;
-      }
-      if (err instanceof PayloadTooLargeError) {
-        sendJson(res, 413, { error: err.message });
-        return;
-      }
-      const message = err instanceof Error ? err.message : "Internal error";
-      sendJson(res, 500, { error: message });
+      exceptionFilter(err, res);
     }
   });
 }
