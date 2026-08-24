@@ -4,8 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "vitest run",
-    "build": "tsc"
+    "test": "tsc && node --test 'dist/test/**/*.js'",
+    "build": "tsc",
+    "start": "node dist/src/server.js"
   },
   "repository": {
     "type": "git",
@@ -20,12 +21,12 @@
   },
   "homepage": "https://github.com/khalek98/mini-nest#readme",
   "dependencies": {
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
     "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "tsx": "^4.23.12",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "typescript": "^6.0.3"
   }
 }

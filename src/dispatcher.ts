@@ -1,0 +1,244 @@
+import "reflect-metadata";
+import http from "node:http";
+import type { Container } from "./container.js";
+import { collectRoutes, type RouteInfo } from "./router.js";
+import {
+  ValidationFailedError,
+  validationPipe,
+} from "./pipes/validation.pipe.js";
+import { type HttpMethod } from "./decorators/methods.js";
+
+export class InvalidJsonError extends Error {
+  constructor() {
+    super("Invalid JSON");
+    this.name = "InvalidJsonError";
+  }
+}
+
+export class PayloadTooLargeError extends Error {
+  constructor() {
+    super("Payload Too Large");
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+const MAX_BODY_BYTES = 1024 * 1024;
+
+export type Next = () => Promise<unknown>;
+
+export type RequestContext = {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  route: RouteInfo;
+  args: unknown[];
+  instance: Record<string, (...a: unknown[]) => unknown>;
+  httpMethod: HttpMethod;
+};
+
+function createHandlerStage(ctx: RequestContext): Next {
+  return () =>
+    Promise.resolve(ctx.instance[ctx.route.handlerName]!(...ctx.args));
+}
+
+function readBody(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const contentLength = Number(req.headers["content-length"]);
+    if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+      reject(new PayloadTooLargeError());
+      req.resume();
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+      req.destroy();
+    };
+
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        fail(new PayloadTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      const raw = Buffer.concat(chunks).toString("utf8");
+      if (!raw) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new InvalidJsonError());
+      }
+    });
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+  });
+}
+
+function matchPath(
+  pattern: string,
+  pathname: string,
+): Record<string, string> | null {
+  const patternParts = pattern.split("/").filter(Boolean);
+  const pathParts = pathname.split("/").filter(Boolean);
+
+  if (patternParts.length !== pathParts.length) return null;
+
+  const params: Record<string, string> = {};
+
+  for (let i = 0; i < patternParts.length; i++) {
+    const pp = patternParts[i]!;
+    const pv = pathParts[i]!;
+    if (pp.startsWith(":")) {
+      params[pp.slice(1)] = pv;
+    } else if (pp !== pv) {
+      return null;
+    }
+  }
+  return params;
+}
+
+function findRoute(
+  routes: RouteInfo[],
+  method: HttpMethod,
+  pathname: string,
+): { route: RouteInfo; params: Record<string, string> } | null {
+  for (const route of routes) {
+    if (route.httpMethod !== method) continue;
+    const params = matchPath(route.path, pathname);
+    if (params) return { route, params };
+  }
+  return null;
+}
+
+function pathMatchesAnyRoute(routes: RouteInfo[], pathname: string): boolean {
+  return routes.some((route) => matchPath(route.path, pathname) !== null);
+}
+
+const PRIMITIVES = new Set([String, Number, Boolean, Object, Array]);
+
+function sendJson(res: http.ServerResponse, status: number, data: unknown) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+}
+
+/** design:paramtypes may live on a parent prototype for inherited handlers. */
+function getHandlerParamtypes(
+  controller: Function,
+  handlerName: string,
+): Function[] {
+  let proto: object | null = controller.prototype;
+  while (proto && proto !== Object.prototype) {
+    const types = Reflect.getOwnMetadata(
+      "design:paramtypes",
+      proto,
+      handlerName,
+    ) as Function[] | undefined;
+    if (types) return types;
+    proto = Object.getPrototypeOf(proto);
+  }
+  return [];
+}
+
+export function createApp(container: Container, controllers: Function[]) {
+  const routes = collectRoutes(controllers);
+  return http.createServer(async (req, res) => {
+    try {
+      const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
+
+      const url = new URL(
+        req.url ?? "/",
+        `http://${req.headers.host ?? "localhost"}`,
+      );
+
+      const found = findRoute(routes, method, url.pathname);
+      if (!found) {
+        if (pathMatchesAnyRoute(routes, url.pathname)) {
+          sendJson(res, 405, { error: "Method Not Allowed" });
+          return;
+        }
+        sendJson(res, 404, { error: "Not Found" });
+        return;
+      }
+
+      const { route, params: pathParams } = found;
+      const body = await readBody(req);
+      const query = Object.fromEntries(url.searchParams.entries());
+
+      const paramtypes = getHandlerParamtypes(
+        route.controller,
+        route.handlerName,
+      );
+
+      const args: unknown[] = [];
+
+      for (let i = 0; i < route.params.length; i++) {
+        const meta = route.params[i];
+        if (!meta) continue;
+
+        if (meta.type === "param") {
+          args[i] = pathParams[meta.name!];
+        } else if (meta.type === "query") {
+          args[i] = query[meta.name!];
+        } else if (meta.type === "body") {
+          const metatype = paramtypes[i] as
+            | (new (...a: any[]) => object)
+            | undefined;
+          if (metatype && !PRIMITIVES.has(metatype as any)) {
+            args[i] = await validationPipe(body, metatype);
+          } else {
+            args[i] = body;
+          }
+        }
+      }
+
+      const instance = container.resolve(
+        route.controller as new (...a: any[]) => any,
+      );
+
+      const ctx: RequestContext = {
+        req,
+        res,
+        route,
+        args,
+        instance,
+        httpMethod: method,
+      };
+
+      const run = createHandlerStage(ctx);
+      const result = await run();
+
+      sendJson(res, method === "POST" ? 201 : 200, result ?? null);
+    } catch (err) {
+      if (err instanceof ValidationFailedError) {
+        sendJson(res, 400, err.errors);
+        return;
+      }
+      if (err instanceof InvalidJsonError) {
+        sendJson(res, 400, { error: err.message });
+        return;
+      }
+      if (err instanceof PayloadTooLargeError) {
+        sendJson(res, 413, { error: err.message });
+        return;
+      }
+      const message = err instanceof Error ? err.message : "Internal error";
+      sendJson(res, 500, { error: message });
+    }
+  });
+}
