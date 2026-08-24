@@ -35,6 +35,13 @@ export type RequestContext = {
   httpMethod: HttpMethod;
 };
 
+export type LifecycleHooks = {
+  onMiddleware?: (ctx: RequestContext) => void | Promise<void>;
+  onGuard?: (ctx: RequestContext) => boolean | Promise<boolean>;
+  onInterceptor?: (ctx: RequestContext, next: Next) => Promise<unknown>;
+  onPipe?: (ctx: RequestContext) => void | Promise<void>;
+};
+
 function createHandlerStage(ctx: RequestContext): Next {
   return () =>
     Promise.resolve(ctx.instance[ctx.route.handlerName]!(...ctx.args));
@@ -137,7 +144,6 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown) {
   res.end(JSON.stringify(data));
 }
 
-/** design:paramtypes may live on a parent prototype for inherited handlers. */
 function getHandlerParamtypes(
   controller: Function,
   handlerName: string,
@@ -155,8 +161,55 @@ function getHandlerParamtypes(
   return [];
 }
 
-export function createApp(container: Container, controllers: Function[]) {
+async function applyBodyValidation(
+  ctx: RequestContext,
+  paramtypes: Function[],
+): Promise<void> {
+  for (let i = 0; i < ctx.route.params.length; i++) {
+    const meta = ctx.route.params[i];
+    if (!meta || meta.type !== "body") continue;
+
+    const metatype = paramtypes[i] as (new (...a: any[]) => object) | undefined;
+    if (metatype && !PRIMITIVES.has(metatype as any)) {
+      ctx.args[i] = await validationPipe(ctx.args[i], metatype);
+    }
+  }
+}
+
+async function runLifecycle(
+  ctx: RequestContext,
+  paramtypes: Function[],
+  hooks: LifecycleHooks,
+): Promise<unknown> {
+  await hooks.onMiddleware?.(ctx);
+
+  if (hooks.onGuard && !(await hooks.onGuard(ctx))) {
+    sendJson(ctx.res, 403, { error: "Forbidden" });
+    return undefined;
+  }
+
+  const intercept =
+    hooks.onInterceptor ?? ((_ctx: RequestContext, next: Next) => next());
+
+  return intercept(ctx, async () => {
+    await applyBodyValidation(ctx, paramtypes);
+    await hooks.onPipe?.(ctx);
+    return createHandlerStage(ctx)();
+  });
+}
+
+export type CreateAppOptions = {
+  hooks?: LifecycleHooks;
+};
+
+export function createApp(
+  container: Container,
+  controllers: Function[],
+  options: CreateAppOptions = {},
+) {
+  const hooks = options.hooks ?? {};
   const routes = collectRoutes(controllers);
+
   return http.createServer(async (req, res) => {
     try {
       const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
@@ -196,14 +249,7 @@ export function createApp(container: Container, controllers: Function[]) {
         } else if (meta.type === "query") {
           args[i] = query[meta.name!];
         } else if (meta.type === "body") {
-          const metatype = paramtypes[i] as
-            | (new (...a: any[]) => object)
-            | undefined;
-          if (metatype && !PRIMITIVES.has(metatype as any)) {
-            args[i] = await validationPipe(body, metatype);
-          } else {
-            args[i] = body;
-          }
+          args[i] = body;
         }
       }
 
@@ -220,8 +266,8 @@ export function createApp(container: Container, controllers: Function[]) {
         httpMethod: method,
       };
 
-      const run = createHandlerStage(ctx);
-      const result = await run();
+      const result = await runLifecycle(ctx, paramtypes, hooks);
+      if (res.headersSent) return;
 
       sendJson(res, method === "POST" ? 201 : 200, result ?? null);
     } catch (err) {
