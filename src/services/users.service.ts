@@ -1,5 +1,6 @@
 import { Injectable } from "../decorators/injectable.js";
 import { CreateUserDto } from "../dto/create-user.dto.js";
+import { getRequestId } from "../context/request-context.js";
 
 type User = { id: string; name: string; email: string };
 
@@ -9,7 +10,14 @@ export class UsersService {
   private seq = 1;
 
   findById(id: string) {
-    return this.users.get(id) ?? { id };
+    return this.readUser(id);
+  }
+
+  private async readUser(id: string) {
+    await new Promise((r) => setTimeout(r, 30));
+    const requestId = getRequestId();
+    const user = this.users.get(id) ?? { id };
+    return { ...user, requestId };
   }
 
   list(limit?: string) {

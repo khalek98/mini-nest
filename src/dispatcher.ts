@@ -1,26 +1,23 @@
 import "reflect-metadata";
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import type { Container } from "./container.js";
+import { runWithRequestContext } from "./context/request-context.js";
 import { collectRoutes, type RouteInfo } from "./router.js";
-import {
-  ValidationFailedError,
-  validationPipe,
-} from "./pipes/validation.pipe.js";
+import { zodValidationPipe } from "./pipes/zod-validation.pipe.js";
 import { type HttpMethod } from "./decorators/methods.js";
+import { compose, passThrough, type Middleware } from "./middleware/compose.js";
+import { type Guard } from "./guards/auth.guard.js";
+import { type Interceptor } from "./interceptors/logging.interceptor.js";
+import {
+  exceptionFilter,
+  InvalidJsonError,
+  PayloadTooLargeError,
+} from "./filters/exception.filter.js";
 
-export class InvalidJsonError extends Error {
-  constructor() {
-    super("Invalid JSON");
-    this.name = "InvalidJsonError";
-  }
-}
-
-export class PayloadTooLargeError extends Error {
-  constructor() {
-    super("Payload Too Large");
-    this.name = "PayloadTooLargeError";
-  }
-}
+export type { Middleware } from "./middleware/compose.js";
+export type { Guard } from "./guards/auth.guard.js";
+export type { Interceptor } from "./interceptors/logging.interceptor.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -33,6 +30,13 @@ export type RequestContext = {
   args: unknown[];
   instance: Record<string, (...a: unknown[]) => unknown>;
   httpMethod: HttpMethod;
+};
+
+export type LifecycleHooks = {
+  onMiddleware?: (ctx: RequestContext) => void | Promise<void>;
+  onGuard?: (ctx: RequestContext) => boolean | Promise<boolean>;
+  onInterceptor?: (ctx: RequestContext, next: Next) => Promise<unknown>;
+  onPipe?: (ctx: RequestContext) => void | Promise<void>;
 };
 
 function createHandlerStage(ctx: RequestContext): Next {
@@ -137,7 +141,6 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown) {
   res.end(JSON.stringify(data));
 }
 
-/** design:paramtypes may live on a parent prototype for inherited handlers. */
 function getHandlerParamtypes(
   controller: Function,
   handlerName: string,
@@ -155,90 +158,180 @@ function getHandlerParamtypes(
   return [];
 }
 
-export function createApp(container: Container, controllers: Function[]) {
+async function applyBodyValidation(
+  ctx: RequestContext,
+  paramtypes: Function[],
+): Promise<void> {
+  for (let i = 0; i < ctx.route.params.length; i++) {
+    const meta = ctx.route.params[i];
+    if (!meta || meta.type !== "body") continue;
+
+    const metatype = paramtypes[i] as (new (...a: any[]) => object) | undefined;
+    if (metatype && !PRIMITIVES.has(metatype as any)) {
+      ctx.args[i] = zodValidationPipe(ctx.args[i], metatype);
+    }
+  }
+}
+
+async function runGuards(
+  ctx: RequestContext,
+  guards: Guard[],
+  onGuard: LifecycleHooks["onGuard"],
+): Promise<boolean> {
+  for (const guard of guards) {
+    if (!(await guard(ctx))) return false;
+  }
+  if (onGuard && !(await onGuard(ctx))) return false;
+  return true;
+}
+
+async function runLifecycle(
+  ctx: RequestContext,
+  paramtypes: Function[],
+  hooks: LifecycleHooks,
+  middleware: Middleware[],
+  guards: Guard[],
+  interceptors: Interceptor[],
+): Promise<unknown> {
+  const outer = compose(middleware);
+  const intercept = compose(interceptors);
+
+  return outer(ctx, async () => {
+    const allowed = await runGuards(ctx, guards, hooks.onGuard);
+    if (!allowed) {
+      // Guard only returns false — dispatcher owns the 403 body (Nest CanActivate).
+      sendJson(ctx.res, 403, { error: "Forbidden" });
+      return undefined;
+    }
+
+    const inner =
+      hooks.onInterceptor ?? ((_ctx: RequestContext, next: Next) => next());
+
+    return intercept(ctx, () =>
+      inner(ctx, async () => {
+        await applyBodyValidation(ctx, paramtypes);
+        await hooks.onPipe?.(ctx);
+        return createHandlerStage(ctx)();
+      }),
+    );
+  });
+}
+
+export type CreateAppOptions = {
+  hooks?: LifecycleHooks;
+  middleware?: Middleware[];
+  /** Optional guards (e.g. authGuard). All must return true; false → 403. */
+  guards?: Guard[];
+  /** Optional interceptors (e.g. loggingInterceptor). First registered = outermost. */
+  interceptors?: Interceptor[];
+};
+
+function resolveMiddleware(
+  hooks: LifecycleHooks,
+  middleware: Middleware[] | undefined,
+): Middleware[] {
+  const list = middleware?.length ? [...middleware] : [passThrough];
+
+  if (hooks.onMiddleware) {
+    const onMiddleware = hooks.onMiddleware;
+    list.unshift(async (ctx, next) => {
+      await onMiddleware(ctx);
+      return next();
+    });
+  }
+
+  return list;
+}
+
+export function createApp(
+  container: Container,
+  controllers: Function[],
+  options: CreateAppOptions = {},
+) {
+  const hooks = options.hooks ?? {};
+  const middleware = resolveMiddleware(hooks, options.middleware);
+  const guards = options.guards ?? [];
+  const interceptors = options.interceptors ?? [];
   const routes = collectRoutes(controllers);
-  return http.createServer(async (req, res) => {
-    try {
-      const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
 
-      const url = new URL(
-        req.url ?? "/",
-        `http://${req.headers.host ?? "localhost"}`,
-      );
+  return http.createServer((req, res) => {
+    const incoming = req.headers["x-request-id"];
+    const requestId =
+      (typeof incoming === "string" && incoming) ||
+      (Array.isArray(incoming) && incoming[0]) ||
+      randomUUID();
+    res.setHeader("X-Request-Id", requestId);
 
-      const found = findRoute(routes, method, url.pathname);
-      if (!found) {
-        if (pathMatchesAnyRoute(routes, url.pathname)) {
-          sendJson(res, 405, { error: "Method Not Allowed" });
+    return runWithRequestContext(requestId, async () => {
+      try {
+        const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
+
+        const url = new URL(
+          req.url ?? "/",
+          `http://${req.headers.host ?? "localhost"}`,
+        );
+
+        const found = findRoute(routes, method, url.pathname);
+        if (!found) {
+          if (pathMatchesAnyRoute(routes, url.pathname)) {
+            sendJson(res, 405, { error: "Method Not Allowed" });
+            return;
+          }
+          sendJson(res, 404, { error: "Not Found" });
           return;
         }
-        sendJson(res, 404, { error: "Not Found" });
-        return;
-      }
 
-      const { route, params: pathParams } = found;
-      const body = await readBody(req);
-      const query = Object.fromEntries(url.searchParams.entries());
+        const { route, params: pathParams } = found;
+        const body = await readBody(req);
+        const query = Object.fromEntries(url.searchParams.entries());
 
-      const paramtypes = getHandlerParamtypes(
-        route.controller,
-        route.handlerName,
-      );
+        const paramtypes = getHandlerParamtypes(
+          route.controller,
+          route.handlerName,
+        );
 
-      const args: unknown[] = [];
+        const args: unknown[] = [];
 
-      for (let i = 0; i < route.params.length; i++) {
-        const meta = route.params[i];
-        if (!meta) continue;
+        for (let i = 0; i < route.params.length; i++) {
+          const meta = route.params[i];
+          if (!meta) continue;
 
-        if (meta.type === "param") {
-          args[i] = pathParams[meta.name!];
-        } else if (meta.type === "query") {
-          args[i] = query[meta.name!];
-        } else if (meta.type === "body") {
-          const metatype = paramtypes[i] as
-            | (new (...a: any[]) => object)
-            | undefined;
-          if (metatype && !PRIMITIVES.has(metatype as any)) {
-            args[i] = await validationPipe(body, metatype);
-          } else {
+          if (meta.type === "param") {
+            args[i] = pathParams[meta.name!];
+          } else if (meta.type === "query") {
+            args[i] = query[meta.name!];
+          } else if (meta.type === "body") {
             args[i] = body;
           }
         }
-      }
 
-      const instance = container.resolve(
-        route.controller as new (...a: any[]) => any,
-      );
+        const instance = container.resolve(
+          route.controller as new (...a: any[]) => any,
+        );
 
-      const ctx: RequestContext = {
-        req,
-        res,
-        route,
-        args,
-        instance,
-        httpMethod: method,
-      };
+        const ctx: RequestContext = {
+          req,
+          res,
+          route,
+          args,
+          instance,
+          httpMethod: method,
+        };
 
-      const run = createHandlerStage(ctx);
-      const result = await run();
+        const result = await runLifecycle(
+          ctx,
+          paramtypes,
+          hooks,
+          middleware,
+          guards,
+          interceptors,
+        );
+        if (res.headersSent) return;
 
-      sendJson(res, method === "POST" ? 201 : 200, result ?? null);
-    } catch (err) {
-      if (err instanceof ValidationFailedError) {
-        sendJson(res, 400, err.errors);
-        return;
+        sendJson(res, method === "POST" ? 201 : 200, result ?? null);
+      } catch (err) {
+        exceptionFilter(err, res);
       }
-      if (err instanceof InvalidJsonError) {
-        sendJson(res, 400, { error: err.message });
-        return;
-      }
-      if (err instanceof PayloadTooLargeError) {
-        sendJson(res, 413, { error: err.message });
-        return;
-      }
-      const message = err instanceof Error ? err.message : "Internal error";
-      sendJson(res, 500, { error: message });
-    }
+    });
   });
 }

@@ -3,10 +3,15 @@ import { Container } from "./container.js";
 import { createApp } from "./dispatcher.js";
 import { HealthController } from "./controllers/health.controller.js";
 import { UsersController } from "./controllers/users.controller.js";
+import { authGuard } from "./guards/auth.guard.js";
+import { loggingInterceptor } from "./interceptors/logging.interceptor.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const container = new Container();
-const server = createApp(container, [HealthController, UsersController]);
+const server = createApp(container, [HealthController, UsersController], {
+  guards: [authGuard],
+  interceptors: [loggingInterceptor()],
+});
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`mini-nest on :${PORT}`);
